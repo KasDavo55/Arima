@@ -116,3 +116,37 @@ export interface ForecastResponse {
   forecast: ForecastPoint[];
   residual_diagnostics: ResidualDiagnostics;
 }
+/** Resumen estadístico que se envía al recomendador de IA. */
+export interface SeriesSummary {
+  n_observations: number;
+  frequency: string;
+  date_range: [string, string];
+  stats: {
+    mean: number;
+    std: number;
+    min: number;
+    max: number;
+    cv: number;
+  };
+  adf_pvalue: number;
+  trend_strength: number;
+  seasonal_strength: number;
+  acf_significant_lags: number[];
+  missing_pct: number;
+}
+
+/** Respuesta del agente de IA con la recomendación de modelo. */
+export interface RecommendationResponse {
+  recommended_model: 'ARIMA' | 'SARIMA' | 'NONE';
+  suggested_params: {
+    p: number;
+    d: number;
+    q: number;
+    P: number;
+    D: number;
+    Q: number;
+    s: number;
+  };
+  confidence: 'alta' | 'media' | 'baja';
+  reasoning: string;
+}

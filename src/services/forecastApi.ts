@@ -9,6 +9,8 @@ import type {
   ExplorationResponse,
   ForecastRequest,
   ForecastResponse,
+  SeriesSummary,
+  RecommendationResponse,
 } from '../types/api.types';
 
 const API_BASE_URL =
@@ -46,6 +48,16 @@ export async function analyzeTimeSeries(
   data: TimeSeriesData,
 ): Promise<ExplorationResponse> {
   return apiCall<ExplorationResponse>('/exploration/analyze', data);
+}
+
+/**
+ * Solicita la recomendación de modelo al agente de IA (Opus).
+ * Recibe un resumen estadístico de la serie y devuelve qué modelo usar.
+ */
+export async function getModelRecommendation(
+  summary: SeriesSummary,
+): Promise<RecommendationResponse> {
+  return apiCall<RecommendationResponse>('/recommend-model', { summary });
 }
 
 /**

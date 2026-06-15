@@ -17,9 +17,24 @@ import {
   detectCategoricalColumns,
   type AggregationMethod,
 } from './utils/aggregator';
-import { analyzeTimeSeries, generateForecast } from './services/forecastApi';
-import type { Frequency, TimeSeriesPoint, ForecastResponse, ExplorationResponse } from './types/api.types';
+import {
+  analyzeTimeSeries,
+  generateForecast,
+  getModelRecommendation,
+} from './services/forecastApi';
+import type {
+  Frequency,
+  TimeSeriesPoint,
+  ForecastResponse,
+  ExplorationResponse,
+  RecommendationResponse,
+} from './types/api.types';
 import type { CsvRow } from './types/csv.types';
+import { ModelRecommendation } from './components/ModelRecommendation';
+import { buildSummary } from './utils/buildSummary';
+import { DataCleaningPanel, type CleaningChoices } from './components/DataCleaningPanel';
+import { analyzeQuality, type QualityReport } from './utils/dataQuality';
+import { applyCleaning } from './utils/dataCleaner';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -130,6 +145,14 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Recomendación de IA
+  const [recommendation, setRecommendation] = useState<RecommendationResponse | null>(null);
+  const [loadingRec, setLoadingRec] = useState(false);
+
+  // Limpieza de datos
+  const [qualityReport, setQualityReport] = useState<QualityReport | null>(null);
+  const [cleanedRows, setCleanedRows] = useState<CsvRow[] | null>(null);
+
   // ── Step 1: File upload ──────────────────────────────────────────────────
 
   const handleFileSelected = useCallback((file: File) => {
@@ -138,10 +161,13 @@ export default function App() {
     setSeries([]);
     setExploration(null);
     setForecastResult(null);
+    setRecommendation(null);
+    setQualityReport(null);
+    setCleanedRows(null);
     void loadFile(file);
   }, [loadFile, reset]);
 
-  // Auto-detect columns when CSV loads
+  // Auto-detect columns + quality check when CSV loads
   const handleCsvLoaded = useCallback((rows: CsvRow[], headers: string[]) => {
     const dates = detectDateColumns(rows, headers);
     const nums = detectNumericColumns(rows, headers);
@@ -151,21 +177,44 @@ export default function App() {
       valueColumn: nums[0] ?? '',
       filters: {},
     }));
-    setStep('aggregate');
+
+    // Detección de calidad sobre el CSV crudo
+    const report = analyzeQuality(rows, nums);
+    setQualityReport(report);
+
+    if (report.hasIssues) {
+      // Hay anomalías: nos quedamos en 'upload' para mostrar el panel de limpieza
+      setCleanedRows(null);
+    } else {
+      // Sin problemas: datos listos, avanzamos
+      setCleanedRows(rows);
+      setStep('aggregate');
+    }
   }, []);
 
   // Watch for CSV load
-  if (state.status === 'success' && step === 'upload') {
+  if (state.status === 'success' && step === 'upload' && qualityReport === null) {
     handleCsvLoaded(state.data.rows, state.data.headers);
   }
+
+  // ── Step 1.5: Apply cleaning ──────────────────────────────────────────────
+
+  const handleApplyCleaning = useCallback((choices: CleaningChoices) => {
+    if (!csvData) return;
+    const nums = detectNumericColumns(csvData.rows, csvData.headers);
+    const cleaned = applyCleaning(csvData.rows, nums, choices) as CsvRow[];
+    setCleanedRows(cleaned);
+    setStep('aggregate');
+  }, [csvData]);
 
   // ── Step 2: Aggregate series ──────────────────────────────────────────────
 
   const handleAggregate = useCallback(() => {
-    if (!csvData) return;
+    const sourceRows = cleanedRows ?? csvData?.rows;
+    if (!sourceRows) return;
     setError(null);
     try {
-      const pts = aggregateToTimeSeries(csvData.rows, aggConfig);
+      const pts = aggregateToTimeSeries(sourceRows, aggConfig);
       if (pts.length < 10) {
         setError('La serie resultante tiene menos de 10 puntos. Ajusta los filtros o la granularidad.');
         return;
@@ -175,17 +224,31 @@ export default function App() {
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Error al agregar los datos.');
     }
-  }, [csvData, aggConfig]);
+  }, [cleanedRows, csvData, aggConfig]);
 
-  // ── Step 3: Explore ───────────────────────────────────────────────────────
+  // ── Step 3: Explore + recomendación de IA ─────────────────────────────────
 
   const handleExplore = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setRecommendation(null);
     try {
-      const result = await analyzeTimeSeries({ points: series, frequency: aggConfig.frequency });
+      const data = { points: series, frequency: aggConfig.frequency };
+      const result = await analyzeTimeSeries(data);
       setExploration(result);
       setStep('forecast');
+
+      // Recomendación de IA (no bloquea el flujo si falla)
+      setLoadingRec(true);
+      try {
+        const summary = buildSummary(result, data);
+        const rec = await getModelRecommendation(summary);
+        setRecommendation(rec);
+      } catch (recErr) {
+        console.error('Fallo recomendación IA:', recErr);
+      } finally {
+        setLoadingRec(false);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Error al analizar la serie.');
     } finally {
@@ -264,6 +327,9 @@ export default function App() {
     [...dateColumns, ...numericColumns],
   ).slice(0, 4);
 
+  // ¿Mostrar el panel de limpieza? (hay reporte con problemas y aún no se limpió)
+  const showCleaning = qualityReport?.hasIssues && !cleanedRows;
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100" style={{ fontFamily: "'DM Sans', system-ui, sans-serif" }}>
       {/* Google Font */}
@@ -312,7 +378,7 @@ export default function App() {
                   <p className="text-xs text-slate-500">{csvData?.totalRows.toLocaleString()} registros · {csvData?.headers.length} columnas</p>
                 </div>
               </div>
-              <button onClick={() => { reset(); setStep('upload'); setSeries([]); setExploration(null); setForecastResult(null); }}
+              <button onClick={() => { reset(); setStep('upload'); setSeries([]); setExploration(null); setForecastResult(null); setRecommendation(null); setQualityReport(null); setCleanedRows(null); }}
                 className="p-2 text-slate-500 hover:text-red-400 transition-colors">
                 <X className="w-4 h-4" />
               </button>
@@ -332,6 +398,13 @@ export default function App() {
             </label>
           )}
         </SectionCard>
+
+        {/* ── STEP 1.5: Limpieza de datos ── */}
+        {showCleaning && qualityReport && (
+          <SectionCard title="1.5 Limpieza de datos" icon={Database}>
+            <DataCleaningPanel report={qualityReport} onApply={handleApplyCleaning} />
+          </SectionCard>
+        )}
 
         {/* ── STEP 2: Aggregate ── */}
         {step !== 'upload' && csvData && (
@@ -515,6 +588,11 @@ export default function App() {
           </SectionCard>
         )}
 
+        {/* ── STEP 3.5: Recomendación de IA ── */}
+        {(exploration || loadingRec) && (
+          <ModelRecommendation recommendation={recommendation} loading={loadingRec} />
+        )}
+
         {/* ── STEP 4: Model config ── */}
         {step === 'forecast' || step === 'results' ? (
           <SectionCard title="4. Configuración del modelo" icon={Settings}>
@@ -682,18 +760,18 @@ export default function App() {
               {/* Download CSV */}
               <button
                 onClick={() => {
-                  const csv = [
-                    'fecha,pronostico,ic_inferior,ic_superior',
-                    ...forecastResult.forecast.map(p =>
-                      `${p.date},${p.forecast.toFixed(4)},${p.lower_bound.toFixed(4)},${p.upper_bound.toFixed(4)}`
-                    ),
-                  ].join('\n');
-                  const blob = new Blob([csv], { type: 'text/csv' });
-                  const url = URL.createObjectURL(blob);
-                  const a = document.createElement('a');
-                  a.href = url; a.download = 'pronostico.csv'; a.click();
-                  URL.revokeObjectURL(url);
-                }}
+  const csv = [
+    'fecha,pronostico,ic_inferior,ic_superior',
+    ...forecastResult.forecast.map(p =>
+      `${p.date},${p.forecast.toFixed(4)},${p.lower_bound.toFixed(4)},${p.upper_bound.toFixed(4)}`
+    ),
+  ].join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'pronostico.csv'; a.click();
+  URL.revokeObjectURL(url);
+}}
                 className="mt-4 flex items-center gap-2 bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-medium px-4 py-2 rounded-lg transition-colors">
                 <FileText className="w-3.5 h-3.5" />
                 Descargar pronóstico CSV
